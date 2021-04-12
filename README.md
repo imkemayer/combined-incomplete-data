@@ -8,9 +8,7 @@ Three notebooks are available, one for the simulation study and two for the data
 
 - `simulations_combinedNA.Rmd` reproducing the **simulations and plots** reported in the article.
 
-It needs to be launched with the `estimators_and_simulations-wo-cw.R` code that contains the functions (IPSW, CO, AIPSW, and simulation protocol).
-
-This notebook does not contain the calibration weighting (CW) method as the function used in the paper is the one from [Lin Dong](https://lynndung.github.io/about/) as an implementations of her [research work](https://arxiv.org/abs/2003.01242). Due to an ongoing reviewing process we only publish the results of the simulations and results without the CW method.
+It needs to be launched either with the code in `estimators_and_simulations_wo_cw.R` and `estimators_wo_cw.R` that contains the functions (IPSW, CO, AIPSW, and simulation protocol) or with the code in `estimators_and_simulations.R` and `estimators.R` to also have the Calibration Weighting estimations. Note that the latter requires the function from the [paper](https://arxiv.org/abs/2003.01242) by [Lin Dong](https://lynndung.github.io/about/). Due to an ongoing reviewing process we cannot make the code for the CW estimator available in this repository. You can submit a request to Lin Dong to get access to her implementation of the CW estimator.
 
 
 ## Data analysis

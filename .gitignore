@@ -1,0 +1,3 @@
+*.RData
+figures/*.pdf
+.DS_Store
