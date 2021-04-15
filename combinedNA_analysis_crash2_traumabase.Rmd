@@ -1,0 +1,1473 @@
+---
+title: "Combined analysis of CRASH-2 and Traumabase for patients with Traumatic Brain Injury, part of 'Treatment effec estimation with missing attributes'"
+author:
+  - Imke Mayer^[EHESS, imke.mayer@ehess.fr]
+  - Other contributors^[Other contributors to this notebook through previous collaborations or active discussions, Bénédicte Colnet, Julie Josse, François-Xavier Ageron, Tobias Gauss, Jean-Denis Moyer.]
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+  html_document:
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+date: "March 2021"
+abstract: | 
+  This notebook performs separate and joint analyses of the CRASH-2 RCT and the observational Traumabase registry. The input data are merged to form a single table ofthe randomized controlled trial and the observational registry (corresponding to the output of `preprocessCrash2Crash3Traumabase.Rmd`). The key functions to perform the analysis below come from the script `estimators.R` (or `estimators_wo_cw.R`).
+---
+
+```{r setup, include=FALSE}
+# Set so that long lines in R will be wrapped:
+library(formatR)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=30), tidy=TRUE)
+knitr::opts_chunk$set(echo = FALSE, cache = FALSE, verbose = FALSE, message=FALSE, warning=FALSE)
+```
+
+# Preliminaries
+
+
+## Load libraries
+
+```{r load_libraries, results='hide', message=F, warning=F, echo=T}
+library(cobalt)     # for balance plots
+library(ggplot2)    # for plots
+library(forcats)    # for factor handling
+library(mice)       # for multiple imputation
+library(boot)       # for bootstrap methods 
+library(naniar)     # for missing values plots
+library(FactoMineR) # for catdes
+library(assertthat) # for assert_that
+library(devtools)   # for source_url load
+library(nleqslv)    # for searchZeros function required in genRCT package
+library(misaem)  # for glm (linear and logistic) with missing data
+library(grf)     # for generalized random forests, option for incomplete data
+library(pracma)
+library(micemd)  # for mice on multilevel data
+library(purrr)   # for the map function used in data.frame handling
+
+# Set random generator seed for reproducible results
+set.seed(123)
+
+# Set data path
+# Define data directory for loading pre-processed data
+data_dir <- "./data/"
+# Define figure directory to save figures
+fig_dir <- "./figures/"
+# Define results directory to save computation results (bootstrap)
+results_dir <- "./results/"
+
+# Load estimators and auxiliary functions
+source('./catdes_redefined.R') 
+
+# If not installed yet, you need to un-comment the following line once to install
+# the genRCT package that allows to use the calibration weighting (CW) estimator
+# install.packages("genRCT_0.1.0.tar.gz", repos = NULL)
+access_genRCT <- require(genRCT)   # calibration weighting estimator, implementation by Dong et al.
+
+# Load implemented estimation functions from GitLab repository
+if (access_genRCT) {
+  source("estimators_and_simulations.R")
+} else {
+  source("estimators_and_simulations_wo_cw.R")
+}
+
+source_url("https://raw.githubusercontent.com/imkemayer/causal-inference-missing/master/Helper/helper_causalInference.R")
+source_url("https://raw.githubusercontent.com/imkemayer/causal-inference-missing/master/Helper/helper_imputation.R")
+```
+
+```{r}
+results_gen_imputed <- results_gen_tbi_imputed <- results_gen <- results_gen_tbi <- results_rwe <-  results_rct <- results_rct_tbi <- NULL
+```
+
+## Choose analysis parameters (outcome, stratum, target population, methods, number of bootstrap samples)
+
+```{r define_context, echo=T}
+outcome_name <- "Death" # outcome used in all analyses (either "Death" or "TBI_Death", 
+                        # corresponding to 28day all-cause mortality and 28day TBI related mortality respectively)
+outcome_name_string <- "death28d"
+stratum_name <- "all" # stratum to consider (either "all", "mild_moderate", "severe", "any_non_react", "both_react")
+rct_name <- "CRASH-2"
+source_population <- "all"# either "all" patients from RCT, or only subset of "3h" patients or "tbi" or "tbi-3h"
+```
+
+```{r additional_options}
+target_population <- "Traumabase_allTBI" # patients from the Traumabase representing the target population
+use_majorExtracranial <- T # whether to use `majorExtracranial` as a covariate or to drop it (without filtering on this variable)
+methods <- c("MIA_AIPW_grf", "MICE_AIPW_grf") # which methods to present at the end in the summary plot (either "all", "glm" or "grf" or explicit list of all observational estimators to plot)
+nboot <- 100 # number of bootstrap samples to be used for confidence intervals
+save_plots <- FALSE # save the plots of this notebook
+```
+
+## Recall observational results for the Traumabase
+
+```{r load_observational_results}
+results_ipw <- results_dr <- NULL
+if (target_population == "Traumabase_allTBI"){
+  if (stratum_name != "all") {
+    if (outcome_name=="TBI_Death"){
+      load(file = paste0(results_dir,"2020-10-30_results_strata_ipw_dr_allTBI_",outcome_name_string, ".RData"))
+    } else {
+      load(file = paste0(results_dir,"2020-10-23_results_strata_ipw_dr.RData"))
+    }
+  } else {
+    if (outcome_name=="TBI_Death"){
+      load(file = paste0(results_dir,"2020-10-30_results_ipw_dr_allTBI_",outcome_name_string, ".RData"))
+      results_ipw$Stratum <- stratum_name
+      results_dr$Stratum <- stratum_name
+    } else {
+      load(file = paste0(results_dir,"2020-10-23_results_ipw_dr.RData"))
+      results_ipw$Stratum <- stratum_name
+      results_dr$Stratum <- stratum_name
+      results_ipw$Regularize <- TRUE
+      results_dr$Regularize <- TRUE # temporary fix (these results have not been obtained with regularized regressions)
+    }
+  }
+  
+}
+if (target_population == "Traumabase_minorExtracranialTBI"){
+  if (stratum_name != "all") {
+    if (outcome_name=="TBI_Death"){
+      load(file = paste0(results_dir,"2020-11-02_results_strata_ipw_dr_minorExtracranialTBI_",outcome_name_string, ".RData"))
+    } else {
+      print('TBA')
+    }
+  } else {
+    if (outcome_name=="TBI_Death"){
+      load(file = paste0(results_dir,"2020-11-02_results_ipw_dr_minorExtracranialTBI_",outcome_name_string, ".RData"))
+      results_ipw$Stratum <- stratum_name
+      results_dr$Stratum <- stratum_name
+    } else {
+      print('TBA')
+    }
+  }
+}
+```
+
+
+```{r arrange_observational_results, eval=T}
+results_rwe <- data.frame("Context" = c(),
+                          "Model" = c(),
+                          "Stratum" =  c(),
+                          "ATE" = c(),
+                          "STD" = c(),
+                          "CI_inf" = c(),
+                          "CI_sup" = c())
+
+if (!is.null(results_ipw)){
+  results_dr$Context <- rep("RWD", nrow(results_dr))
+  results_ipw$Context <- rep("RWD", nrow(results_ipw))
+  
+  # by default (ATE results with Mask and regularized glm regressions)
+  results_dr <- results_dr[results_dr$Mask == TRUE & results_dr$Estimand=="ATE" &
+                           results_dr$Regularize == TRUE,]
+  results_ipw <- results_ipw[results_ipw$Mask == TRUE & results_ipw$Estimand=="ATE" &
+                             results_ipw$Regularize == TRUE,]
+  
+  # we keep MIA and MICE
+  results_dr <- results_dr[which(tolower(results_dr$Imputation.method) %in% c("mia", "mice")),]
+  results_ipw <- results_ipw[which(tolower(results_ipw$Imputation.method) %in% c("mia", "mice")),]
+  
+  results_dr$Model <- case_when(results_dr$Imputation.method == "mia" ~ "MIA_AIPW_grf",
+                                results_dr$Imputation.method == "mice" & results_dr$PS.estimation == "grf.ate" ~ "MICE_AIPW_grf",
+                                results_dr$Imputation.method == "mice" & results_dr$PS.estimation == "glm.grf" ~ "MICE_AIPW_glm")
+  
+  results_ipw$Model <- case_when(results_ipw$Imputation.method == "mia" ~ "MIA_IPW_grf",
+                                results_ipw$Imputation.method == "mice" & results_ipw$PS.estimation == "grf.ate" ~ "MICE_IPW_grf",
+                                results_ipw$Imputation.method == "mice" & results_ipw$PS.estimation == "glm" ~ "MICE_IPW_glm")
+  
+  
+  results_ipw <- results_ipw[, c("Context", "Model", "Stratum", "ATE.normalized", "STD.ATE.normalized")]
+  colnames(results_ipw) <- c("Context", "Model", "Stratum", "ATE", "STD")
+  
+  results_rwe <- rbind(results_rwe, 
+                         results_dr[, c("Context", "Model", "Stratum", "ATE", "STD")],
+                         results_ipw)
+  
+  results_rwe$CI_inf <- as.numeric(results_rwe$ATE) - as.numeric(results_rwe$STD)*1.96
+  results_rwe$CI_sup <- as.numeric(results_rwe$ATE) + as.numeric(results_rwe$STD)*1.96
+}
+```
+
+```{r, echo=T}
+results_rwe
+```
+
+## Separate analyses
+
+### Load the pre-processed CRASH-2 and Traumabase data
+
+To pre-process the CRASH-2 and the Traumabase data, first run the notebook `preprocessCrash2Crash3Traumabase.Rmd`.
+
+```{r load_data, message=F, results='hide', echo=T}
+# Load names of relevant variables
+load(paste0(data_dir, "crash2_crash3_variables.RData"))
+
+# Load incomplete combined RCT data
+total_allPatients <- read.csv(paste0(data_dir,"output_preprocess_combined_allPatients_crash2_crash3_TB.csv"), row.names = 1)
+
+# Load incomplete combined data
+total_tbi <- read.csv(paste0(data_dir,"output_preprocess_combined_crash2_crash3_TB.csv"), row.names = 1)
+
+# Load incomplete combined data
+total_tbi_3h <- read.csv(paste0(data_dir,"output_preprocess_combined_crash2_3h_crash3_3h_TB.csv"), row.names = 1)
+```
+
+
+
+```{r filter_outcome, message=F, echo=F}
+if (outcome_name=="Death"){
+  total_tbi <- total_tbi[, !names(total_tbi)=="TBI_Death"]
+  total_tbi_3h <- total_tbi_3h[, !names(total_tbi_3h)=="TBI_Death"]
+  total_allPatients <- total_allPatients[, !names(total_allPatients)=="TBI_Death"]
+} else {
+  total_tbi <- total_tbi[, !names(total_tbi)=="Death"]
+  total_tbi_3h <- total_tbi_3h[, !names(total_tbi_3h)=="Death"]
+  total_allPatients <- total_allPatients[, !names(total_allPatients)=="Death"]
+}
+```
+
+
+Depending on the value of `source_population`, we keep 
+
+- all patients if `source_population=="all"`
+- only patients from CRASH-2 who were randomized within 3 hours of the accident if `source_population=="3h"`
+- only TBI patients from CRASH-2 if `source_population=="tbi"`
+- only TBI patients from CRASH-2 who were randomized within 3 hours of the accident if `source_population=="tbi-3h"`
+
+```{r subset_selection}
+rownames(total_allPatients) <- 1:nrow(total_allPatients)
+
+if (source_population=="3h"){
+  total_allPatients <- total_allPatients[which(total_allPatients$V==0 | (total_allPatients$V==1 & total_allPatients$timeSinceInjury<=3)),]
+  
+  rownames_raw <- rownames(total_allPatients)
+}
+if (source_population=="tbi"){
+  if (target_population == "Traumabase_allTBI"){
+    total_allPatients <- total_allPatients[which( total_allPatients$TBI==1),]
+  } else {
+    total_allPatients <- total_allPatients[which(total_allPatients$V==0 | (total_allPatients$V==1 & total_allPatients$TBI==1)),]
+  }
+  total_allPatients <- dplyr::select(total_allPatients, -"TBI")
+  
+  rownames_raw <- rownames(total_allPatients)
+}
+if (source_population%in% c("tbi-3h", "3h-tbi")){
+  total_allPatients <- total_allPatients[which(total_allPatients$V==0 | (total_allPatients$V==1 & total_allPatients$TBI==1& total_allPatients$timeSinceInjury<=3)),]
+  total_allPatients <- dplyr::select(total_allPatients, -"TBI")
+}
+```
+
+```{r subset_target}
+if (source_population!="tbi" & target_population == "Traumabase_allTBI"){
+  total_allPatients <- total_allPatients[which(total_allPatients$V==1 | (total_allPatients$V==0 & total_allPatients$TBI==1)),]
+  total_allPatients <- dplyr::select(total_allPatients, -"TBI")
+}
+```
+
+
+```{r choose_data}
+crash2 <- total_allPatients[which(total_allPatients$V3 %in% 0:1), c(crash2_trial_eligibility, crash2_outcome_impact, crash2_trial_eligibility_addition, "treatment", outcome_name, "V", "V3")]
+
+crash3 <- total_allPatients[which(total_allPatients$V3 %in% c(0,2)), c(crash3_trial_eligibility, crash3_outcome_impact, crash3_trial_eligibility_addition, "treatment", outcome_name, "V", "V3")]
+
+if (rct_name == "CRASH-2"){
+  total <- crash2
+  trial_eligibility <- crash2_trial_eligibility
+  outcome_impact <- crash2_outcome_impact
+  trial_eligibility_addition <- crash2_trial_eligibility_addition
+} 
+if (rct_name == "CRASH-3") {
+  total <- crash3
+  trial_eligibility <- crash3_trial_eligibility
+  outcome_impact <- crash3_outcome_impact
+  trial_eligibility_addition <- crash3_trial_eligibility_addition
+}
+rownames_total_raw <- rownames(total)
+```
+
+
+# Separate analyses to reproduce paper results
+
+## CRASH-2 analysis (results from CRASH-2 paper)
+
+In this part we load the CRASH-2 data and reproduce the results in the publication with the risk ratio (RR). We also provide the results with the ATE to fit the framework of the review.
+
+The outcome is the 28-day all-cause death. 
+
+
+To recover the exact same results as presented in the CRASH-2 paper, we do not remove patients with time since injury of more than 3 hours.
+
+
+```{r crash2_paper_results_1}
+temp <- read.csv(paste0(data_dir,"output_preprocess_combined_allPatients_crash2_crash3_TB.csv"), row.names = 1)
+temp <- temp[which(temp$V3==1),]
+risk_ratio(temp, outcome_name="Death", treatment_name="treatment")
+difference_in_means(temp, outcome_name="Death", treatment_name="treatment")
+```
+
+We also recover the results for the head-injury related 28d mortality.
+
+```{r crash2_paper_results_2}
+risk_ratio(temp, outcome_name="TBI_Death", treatment_name="treatment")
+difference_in_means(temp, outcome_name="TBI_Death", treatment_name="treatment")
+```
+
+Before computing the estimates on the CRASH-2 data, we first compute the PCA to detect possible outliers.
+
+
+
+# Analysis on `total`
+```{r total1}
+N <- nrow(total)
+n <- nrow(total[total$V ==1, ])
+m <- nrow(total[total$V ==0, ])
+rownames(total) <- 1:N
+
+if (target_population=="Traumabase_minorExtracranialTBI" & "majorExtracranial" %in% colnames(total)) {
+  total <- total[which(total$majorExtracranial==0), ]
+  total <- dplyr::select(total, -c("majorExtracranial"))
+}
+
+if (!use_majorExtracranial & "majorExtracranial" %in% colnames(total)) {
+  total <- dplyr::select(total, -c("majorExtracranial"))
+}
+```
+
+
+```{r, echo=F, results='hide'}
+#Check correct outcome
+assert_that(outcome_name %in% colnames(total))
+```
+
+Before computing the estimates on the RCT data, we first compute the PCA to detect possible outliers.
+
+## ACP
+
+```{r}
+total_pca <- total[,c("V3", colnames(total)[which(sapply(total, function(x) is.numeric(x) & length(unique(na.omit(x)))>2))])]
+total_famd <- total
+
+
+colnames(total_pca)[which(names(total_pca) == "V3")] <- "S3"
+colnames(total_pca)[which(names(total_pca) == "pupilReact_num")] <- "pupil Reactivity"
+colnames(total_famd)[which(names(total_famd) == "V3")] <- "S3"
+colnames(total_famd)[which(names(total_famd) == "pupilReact_num")] <- "pupil Reactivity"
+
+total_pca$S3 <- as.factor(total_pca$S3)
+total_famd$S3 <- as.factor(total_famd$S3)
+
+res.pca <- PCA(total_pca, quali.sup= which(colnames(total_pca)=="S3"), graph=F)
+
+plot(res.pca, choix="ind", label=c("quali","ind"), autoLab="no")
+```
+
+```{r}
+plot(res.pca, choix="var")
+```
+
+```{r}
+if (save_plots) {
+  pdf(paste0(fig_dir,"acp_ind_rct", rct_name,"_source",source_population,"_target",target_population, "_", stratum_name, "patients.pdf"))
+  plot(res.pca, choix="ind", label=c("quali","ind"), autoLab="no")
+  dev.off()
+  pdf(paste0(fig_dir,"acp_var_rct", rct_name,"_source",source_population,"_target",target_population, "_", stratum_name, "patients.pdf"))
+  plot(res.pca, choix="var")
+  dev.off()
+}
+```
+
+We identify 2 outliers for CRASH-2 and 3-4 outliers for CRASH-3. The corresponding observations are:
+```{r, echo=F}
+if (rct_name == "CRASH-2"){
+  if (source_population=="all"){
+    print(total_pca[c(7341, 17887, 20203),])
+  }
+  if (source_population=="3h"){
+    print(total_pca[c(12006, 13526),])
+  }
+}
+if (rct_name == "CRASH-3"){
+  if (source_population=="all"){
+    print(total_pca[c(15969, 17243, 17468, 20880),])
+  }
+  if (source_population=="3h"){
+    print(total_pca[c(13716, 13941, 17353),])
+  }
+}
+```
+
+We will remove these observations
+
+```{r}
+if (rct_name == "CRASH-2"){
+  if (source_population=="all"){
+    total <- total[-c(7341, 17887, 20203),]
+  }
+  
+  if (source_population=="3h"){
+    total <- total[-c(12006, 13526),]
+  }
+}
+
+if (rct_name == "CRASH-3"){
+  if (source_population=="all"){
+    total <- total[-c(15969, 17243, 17468, 20880),]
+  }
+  if (source_population=="3h"){
+    total <- total[-c(13716, 13941, 17353),]
+  }
+}
+
+N <- nrow(total)
+n <- nrow(total[total$V ==1, ])
+m <- nrow(total[total$V ==0, ])
+```
+
+
+```{r, echo=F}
+total_pca <- total[,c("V3", colnames(total)[which(sapply(total, function(x) is.numeric(x) & length(unique(na.omit(x)))>2))])]
+
+
+colnames(total_pca)[which(names(total_pca) == "V3")] <- "S3"
+colnames(total_pca)[which(names(total_pca) == "pupilReact_num")] <- "pupil Reactivity"
+
+total_pca$S3 <- as.factor(total_pca$S3)
+
+res.pca <- PCA(total_pca, quali.sup= which(colnames(total_pca)=="S3"), graph=F)
+
+plot(res.pca, choix="ind", label=c("quali"))
+```
+
+```{r}
+plot(res.pca, choix="var")
+```
+
+
+
+We will keep the results from all RCT patients and from the TBI patients in the RCT
+
+```{r rct_results_outcome_name, echo=F}
+# all CRASH-2 patients
+temp <- total[which(total$V==1),]
+
+risk_ratio(temp, outcome_name=outcome_name, treatment_name="treatment")
+diff_means_rct <- difference_in_means(temp, outcome_name=outcome_name, treatment_name="treatment")
+print(diff_means_rct)
+
+results_rct <- rbind(results_rct, 
+                     cbind(Context = paste0("RCT - ",rct_name), 
+                          Model = "Difference_in_means", 
+                          Stratum = stratum_name, 
+                          ATE = diff_means_rct[[1]], 
+                          STD = diff_means_rct[[3]]-diff_means_rct[[1]], 
+                          CI_inf = diff_means_rct[[2]],
+                          CI_sup = diff_means_rct[[3]]))
+
+diff_condmeans_rct <- difference_in_condmeans_ols(temp[, c(trial_eligibility, outcome_impact, "treatment", outcome_name)], outcome_name=outcome_name, treatment_name="treatment")
+print(diff_condmeans_rct)
+
+results_rct <- rbind(results_rct, 
+                     cbind(Context = paste0("RCT - ",rct_name), 
+                           Model = "Difference_in_condmeans", 
+                           Stratum = stratum_name, 
+                           ATE = diff_condmeans_rct[[1]], 
+                           STD = diff_condmeans_rct[[3]]-diff_condmeans_rct[[1]], 
+                           CI_inf = diff_condmeans_rct[[2]],
+                           CI_sup = diff_condmeans_rct[[3]]))
+
+```
+
+
+
+## Final data set overview
+
+### Size 
+
+The final size of the data.frame is `r N`, with 
+
+- `r n` observations from the `r rct_name` RCT , and
+- `r m` observations from the Traumabase.
+
+```{r, echo=F}
+res.table <- table(ifelse(total$V==0, "Traumabase", rct_name), total$treatment, 
+                   dnn = c("Study","Treated"),
+                   useNA = "ifany")
+print(res.table)
+res.table <- table(ifelse(total$V==0, "Traumabase", rct_name), total[, outcome_name], 
+                   dnn = c("Study","Died"),
+                   useNA = "ifany")
+print(res.table)
+```
+
+
+
+### Missing values 
+
+First, note that the RCT contains nearly no missing values.
+
+```{r}
+vis_miss(total[total$V==1, ])
+```
+
+
+The Traumabase subset taken contains missing values, it explains why the 
+estimators for transporting the ATE have to be adapted to take into account 
+these missing values. 
+
+```{r}
+vis_miss(total[total$V == 0, ])
+```
+
+Alternatively we can plot the barplots of percentage of missing values
+
+```{r}
+temp <- total
+temp$V <- as.factor(temp$V)
+temp <- dplyr::select(temp, -c("continent","V3"))
+levels(temp$V) <- c("Observational data", "RCT")
+gg_miss_var(temp, show_pct = TRUE, facet = V) +
+  theme(text = element_text(size=13, face="bold"), axis.text=element_text(size=13, face="bold")) +
+  scale_y_sqrt() +
+  labs(y = "% Missing") +
+  labs(x="")
+```
+
+```{r}
+if (save_plots) {
+  ggsave(filename=paste0(fig_dir, "missing-proportions_rct", rct_name, "_source", source_population, "_", stratum_name,"patients_", outcome_name_string, ".pdf"),
+         plot = last_plot(),
+         width=8.8, height=6.8) 
+  ggsave(filename=paste0(fig_dir, "missing-proportions_rct", rct_name, "_source", source_population, "_", stratum_name,"patients_", outcome_name_string, ".eps"),
+         plot = last_plot(),
+         width=8.8, height=6.8) 
+}
+```
+
+
+# Separate causal analyses using standard causal inference estimators (IPW, etc.)
+
+## ATE using only the RCT data
+
+We apply the standard ATE estimators, parametric and non-parametric, on the RCT data,
+using the baseline variables as regressors.
+
+### Estimation
+```{r}
+results_rct_ipw_dr <- c()
+
+if (file.exists(paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_ipw_dr_estimators_",outcome_name_string, ".RData"))) {
+  load(file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_ipw_dr_estimators_",outcome_name_string, ".RData"))
+} else {
+  df_tmp <- total[which(total$V==1),]
+  
+  # IPW, without continent
+  tmp <- ipw(df_tmp[,  trial_eligibility],
+             outcome=df_tmp[, outcome_name],
+             treat=df_tmp[, "treatment"],
+             ps.method="saem")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "IPW_glm_woContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[2],
+                                    "STD" = tmp[4],
+                                    "CI_inf" = tmp[2]-1.96*tmp[4],
+                                    "CI_sup" = tmp[2]+1.96*tmp[4]))
+  
+  tmp <- ipw(df_tmp[, trial_eligibility],
+             outcome=df_tmp[, outcome_name],
+             treat=df_tmp[, "treatment"],
+             ps.method="grf")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "IPW_grf_woContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[2],
+                                    "STD" = tmp[4],
+                                    "CI_inf" = tmp[2]-1.96*tmp[4],
+                                    "CI_sup" = tmp[2]+1.96*tmp[4]))
+  
+  # IPW, continent as fixed effect
+  
+  # tmp <- ipw(X=df_tmp[, c(trial_eligibility, outcome_impact, trial_eligibility_addition)],
+  #            outcome=df_tmp[, outcome_name],
+  #            treat=df_tmp[, "treatment"],
+  #            ps.method="saem")
+  #   
+  # results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+  #                             data_frame("Context" = paste0("RCT - ",rct_name), 
+  #                                   "Model" = "IPW_glm_fixedContinent", 
+  #                                   "Stratum" = stratum_name,
+  #                                   "ATE" = tmp[2],
+  #                                   "STD" = tmp[4],
+  #                                   "CI_inf" = tmp[2]-1.96*tmp[4],
+  #                                   "CI_sup" = tmp[2]+1.96*tmp[4]))
+  
+  tmp <- ipw(df_tmp[, c(trial_eligibility, trial_eligibility_addition)],
+             outcome=df_tmp[, outcome_name],
+             treat=df_tmp[, "treatment"],
+             ps.method="grf")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "IPW_grf_fixedContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[2],
+                                    "STD" = tmp[4],
+                                    "CI_inf" = tmp[2]-1.96*tmp[4],
+                                    "CI_sup" = tmp[2]+1.96*tmp[4]))
+  
+  
+  # DR, without continent
+  tmp <- dr(X=df_tmp[, c(trial_eligibility, outcome_impact)],
+            X.for.ps = df_tmp[ ,trial_eligibility],
+            outcome=df_tmp[, outcome_name],
+            treat=df_tmp[, "treatment"],
+            ps.method="glm.grf", out.method="glm.grf")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "DR_glm_woContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[1],
+                                    "STD" = tmp[2],
+                                    "CI_inf" = tmp[1]-1.96*tmp[2],
+                                    "CI_sup" = tmp[1]+1.96*tmp[2]))
+  
+  ## with fixed propensity score = 0.5
+  tmp <- dr(X=df_tmp[, c(trial_eligibility, outcome_impact)],
+            fitted = data.frame(pscore=rep(0.5, nrow(df_tmp))),
+            outcome=df_tmp[, outcome_name],
+            treat=df_tmp[, "treatment"],
+            ps.method="glm.grf", out.method="glm.grf")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "DR_ps05_glm_woContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[1],
+                                    "STD" = tmp[2],
+                                    "CI_inf" = tmp[1]-1.96*tmp[2],
+                                    "CI_sup" = tmp[1]+1.96*tmp[2]))
+  
+  
+  tmp <- dr(X=df_tmp[, c(trial_eligibility, outcome_impact)],
+            X.for.ps = df_tmp[ ,trial_eligibility],
+            outcome=df_tmp[, outcome_name],
+            treat=df_tmp[, "treatment"],
+            ps.method="grf.ate", out.method="grf.ate")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "DR_grf_woContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[1],
+                                    "STD" = tmp[2],
+                                    "CI_inf" = tmp[1]-1.96*tmp[2],
+                                    "CI_sup" = tmp[1]+1.96*tmp[2]))
+  
+  ## with fixed propensity score = 0.5
+  tmp <- dr(X=df_tmp[, c(trial_eligibility, outcome_impact)],
+            fitted = data.frame(pscore=rep(0.5, nrow(df_tmp))),
+            outcome=df_tmp[, outcome_name],
+            treat=df_tmp[, "treatment"],
+            ps.method="grf.ate", out.method="grf.ate")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "DR_ps05_grf_woContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[1],
+                                    "STD" = tmp[2],
+                                    "CI_inf" = tmp[1]-1.96*tmp[2],
+                                    "CI_sup" = tmp[1]+1.96*tmp[2]))
+  
+  # DR, with continent as fixed effect
+  
+  # tmp <- dr(X=df_tmp[, c(trial_eligibility, outcome_impact, trial_eligibility_addition)],
+  #           X.for.ps = df_tmp[ ,c(trial_eligibility, trial_eligibility_addition)],
+  #           outcome=df_tmp[, outcome_name],
+  #           treat=df_tmp[, "treatment"],
+  #           ps.method="glm.grf", out.method="glm.grf")
+  #   
+  # results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+  #                             data_frame("Context" = paste0("RCT - ",rct_name), 
+  #                                   "Model" = "DR_glm_fixedContinent", 
+  #                                   "Stratum" = stratum_name,
+  #                                   "ATE" = tmp[1],
+  #                                   "STD" = tmp[2],
+  #                                   "CI_inf" = tmp[1]-1.96*tmp[2],
+  #                                   "CI_sup" = tmp[1]+1.96*tmp[2]))
+  
+  # tmp <- dr(X=df_tmp[, c(trial_eligibility, outcome_impact, trial_eligibility_addition)],
+  #           fitted = data.frame(pscore=rep(0.5, nrow(df_tmp))),
+  #           outcome=df_tmp[, outcome_name],
+  #           treat=df_tmp[, "treatment"],
+  #           ps.method="glm.grf", out.method="glm.grf")
+  # 
+  # results_rct_ipw_dr <- rbind(results_rct_ipw_dr,
+  #                             data_frame("Context" = paste0("RCT - ",rct_name),
+  #                                   "Model" = "DR_glm_fixedContinent",
+  #                                   "Stratum" = stratum_name,
+  #                                   "ATE" = tmp[1],
+  #                                   "STD" = tmp[2],
+  #                                   "CI_inf" = tmp[1]-1.96*tmp[2],
+  #                                   "CI_sup" = tmp[1]+1.96*tmp[2]))
+  
+  tmp <- dr(X=df_tmp[, c(trial_eligibility, outcome_impact, trial_eligibility_addition)],
+            X.for.ps = df_tmp[ ,c(trial_eligibility, trial_eligibility_addition)],
+            outcome=df_tmp[, outcome_name],
+            treat=df_tmp[, "treatment"],
+            ps.method="grf.ate", out.method="grf.ate")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "DR_grf_fixedContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[1],
+                                    "STD" = tmp[2],
+                                    "CI_inf" = tmp[1]-1.96*tmp[2],
+                                    "CI_sup" = tmp[1]+1.96*tmp[2]))
+  
+  # DR, with continent as random effect
+  tmp <- dr(X=df_tmp[, c(trial_eligibility, outcome_impact)],
+            clusters=as.factor(df_tmp[, trial_eligibility_addition]),
+            outcome=df_tmp[, outcome_name],
+            treat=df_tmp[, "treatment"],
+            ps.method="glm.grf", out.method="glm.grf")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "DR_glm_randomContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[1],
+                                    "STD" = tmp[2],
+                                    "CI_inf" = tmp[1]-1.96*tmp[2],
+                                    "CI_sup" = tmp[1]+1.96*tmp[2]))
+  
+  
+  tmp <- dr(X=df_tmp[, c(trial_eligibility, outcome_impact)],
+            clusters=as.factor(df_tmp[, trial_eligibility_addition]),
+            outcome=df_tmp[, outcome_name],
+            treat=df_tmp[, "treatment"],
+            ps.method="grf.ate", out.method="grf.ate")
+    
+  results_rct_ipw_dr <- rbind(results_rct_ipw_dr, 
+                              data_frame("Context" = paste0("RCT - ",rct_name), 
+                                    "Model" = "DR_grf_randomContinent", 
+                                    "Stratum" = stratum_name,
+                                    "ATE" = tmp[1],
+                                    "STD" = tmp[2],
+                                    "CI_inf" = tmp[1]-1.96*tmp[2],
+                                    "CI_sup" = tmp[1]+1.96*tmp[2]))
+  save(results_rct_ipw_dr, file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_ipw_dr_estimators_", outcome_name_string, ".RData"))
+}
+```
+
+
+### Plot of the final results
+
+```{r}
+results <- rbind(results_rct_ipw_dr, results_rct)
+results$CI_inf <- as.numeric(results$CI_inf)
+results$CI_sup <- as.numeric(results$CI_sup)
+
+results$ATE <- as.numeric(results$ATE)
+results$Context <- as.factor(results$Context)
+results$Model <- as.factor(results$Model)
+results$Stratum <- as.factor(results$Stratum)
+levels(results$Context) = c(paste0("RCT - ", rct_name, 
+                                   "\n(",length(trial_eligibility),
+                                   "+",length(outcome_impact),
+                                   " variables)"))
+results$Context <- as.character(results$Context)
+if (length(unique(results$Context))>1) { results <- results[order(results$Context),] }
+if (methods %in% c("grf", "glm")){
+  results <- results %>%
+    filter(endsWith(Model, methods) | startsWith(Context, "RCT"))
+} else if (methods != "all") {
+  results <- results %>%
+    filter(startsWith(Context, "RCT") | startsWith(Context, "Generalization") | (startsWith(Context, "Observational") & Model %in% methods))
+}
+results %>%
+  filter(Stratum == stratum_name & !(Model %in% c("EM_IPSW_glm", "MIA_IPSW_grf"))) %>% #& !(Model %in% c("EM_AIPSW_glm", "EM_IPSW_glm"))) %>%
+  mutate(Model = fct_reorder(Model, Context)) %>%
+ggplot(aes(x = Model, y = ATE, ymin = CI_inf, ymax = CI_sup, color = Context)) + 
+  geom_errorbar(width = 0.2) +
+  geom_point(size = 1.5) +
+  geom_hline(aes(yintercept=0))+
+  xlab("")+
+  coord_flip() +
+  theme_bw() +
+  theme(legend.text = element_blank(),
+        legend.title = element_blank(),
+        legend.position="none",
+        legend.key = element_rect(color = NA, fill = NA),
+        legend.key.size = unit(1.5, "cm")) + 
+  scale_color_manual(values=c("#C41E4E", "darkorchid4", "deepskyblue2", "yellow4", "darkorange1"), breaks=c("Generalization","Observational data \n(17+21 variables)" , "RCT - CRASH-2\n(5+5 variables)","RCT - CRASH-2+CRASH-3 \n(0 variables)", "RCT - CRASH-3\n(3+4 variables)"))
+```
+
+```{r}
+if (save_plots) {
+  if (use_majorExtracranial){
+    ggsave(filename=paste0(fig_dir, "results_rct", rct_name, "_source", source_population, "_", stratum_name,"patients_", outcome_name_string, ".pdf"),
+         plot = last_plot(),
+         width=6.8, height=8.8) 
+  } else {
+    ggsave(filename=paste0(fig_dir, "results_rct", rct_name, "_source", source_population, "_woExtracranialVar_", stratum_name,"patients_", outcome_name_string, ".pdf"),
+         plot = last_plot(),
+         width=6.8, height=8.8)
+  }
+}
+```
+
+
+
+## ATE using only the Traumabase data
+
+We can first use a naive difference in means, for which we can conclude that TXA 
+increases death (treatment bias, confounding bias, Simpson's paradox).
+
+```{r}
+temp <- total[total$V == 0,]
+risk_ratio(temp, outcome_name=outcome_name, treatment_name="treatment")
+difference_in_means(temp, outcome_name=outcome_name, treatment_name="treatment")
+```
+
+## Distributional shift visualization
+
+```{r}
+DF_for_plot <- total
+DF_for_plot$sample <- case_when(DF_for_plot$V3 == 2 ~ "CRASH-3",
+                                DF_for_plot$V3 == 1 ~ "CRASH-2",
+                                DF_for_plot$V3 == 0 ~ "Traumabase")
+
+ggplot(DF_for_plot, aes(x = age, group = sample, fill = sample)) +
+    geom_histogram(aes(y=..density..), binwidth = 2, alpha=0.4, position="dodge") + 
+        scale_fill_manual(values=c("Traumabase"="darkorchid4", "CRASH-2"="deepskyblue2", "CRASH-3"="darkorange1")) +
+    geom_density(alpha = .2, aes(color=sample)) +
+        scale_color_manual(values=c("Traumabase"="darkorchid4", "CRASH-2"="deepskyblue2", "CRASH-3"="darkorange1")) +
+    theme_classic() +
+    theme(legend.title = element_blank(), legend.position = "bottom", legend.box = "horizontal", legend.text = element_text(size=13, face="bold")) +
+  ylab("") +  # no title in legend
+     theme(axis.text = element_text(vjust = 0.5, hjust=1, size=8, face="bold"), axis.title.x = element_text(size=10, face="bold"))
+
+if (use_majorExtracranial){
+  ggsave(filename=paste0(fig_dir, "distribution_age_combining_crash2_traumabase_", "source", source_population, "_target", target_population, "_", stratum_name,"patients.pdf"),
+       plot = last_plot(),
+       width=8.8, height=6.8) 
+} else {
+  ggsave(filename=paste0(fig_dir, "distribution_age_combining_crash2_traumabase_", "source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name,"patients.pdf"),
+       plot = last_plot(),
+       width=8.8, height=6.8)
+}
+
+
+ggplot(DF_for_plot, aes(x = Glasgow.initial, group = sample, fill = sample)) +
+    geom_histogram(aes(y=..density..), binwidth = 1, alpha=0.4, position="dodge") + 
+        scale_fill_manual(values=c("Traumabase"="darkorchid4", "CRASH-2"="deepskyblue2", "CRASH-3"="darkorange1")) +
+    theme_classic() +
+    theme(legend.title = element_blank(), legend.position = "bottom", legend.box = "horizontal", legend.text = element_text(size=13, face="bold")) +
+  ylab("") +  # no title in legend
+     theme(axis.text = element_text(vjust = 0.5, hjust=1, size=8, face="bold"), axis.title.x = element_text(size=10, face="bold"))
+
+if (save_plots) {
+  if (use_majorExtracranial){
+    ggsave(filename=paste0(fig_dir, "distribution_GCS_combining_crash2_traumabase_", "source", source_population, "_target", target_population, "_", stratum_name,"patients.pdf"),
+         plot = last_plot(),
+         width=8.8, height=6.8) 
+  } else {
+    ggsave(filename=paste0(fig_dir, "distribution_GCS_combining_crash2_traumabase_", "source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name,"patients.pdf"),
+         plot = last_plot(),
+         width=8.8, height=6.8)
+  }
+}
+
+ggplot(DF_for_plot, aes(x = systolicBloodPressure, group = sample, fill = sample)) +
+    geom_histogram(aes(y=..density..), binwidth = 2, alpha=0.4, position="dodge") + 
+        scale_fill_manual(values=c("Traumabase"="darkorchid4", "CRASH-2"="deepskyblue2", "CRASH-3"="darkorange1")) +
+    geom_density(alpha = .2, aes(color=sample)) +
+        scale_color_manual(values=c("Traumabase"="darkorchid4", "CRASH-2"="deepskyblue2", "CRASH-3"="darkorange1")) +
+    theme_classic() +
+    theme(legend.title = element_blank(), legend.position = "bottom", legend.box = "horizontal", legend.text = element_text(size=13, face="bold")) +
+  ylab("") +  # no title in legend
+     theme(axis.text = element_text(vjust = 0.5, hjust=1, size=8, face="bold"), axis.title.x = element_text(size=10, face="bold"))
+
+if (save_plots) {
+  if (use_majorExtracranial){
+    ggsave(filename=paste0(fig_dir, "distribution_SBP_combining_crash2_traumabase_", "source", source_population, "_target", target_population, "_", stratum_name,"patients.pdf"),
+         plot = last_plot(),
+         width=8.8, height=6.8) 
+  } else {
+    ggsave(filename=paste0(fig_dir, "distribution_SBP_combining_crash2_traumabase_", "source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name,"patients.pdf"),
+         plot = last_plot(),
+         width=8.8, height=6.8)
+  }
+}
+
+DF_for_plot$sexe <- as.factor(DF_for_plot$sexe)
+levels(DF_for_plot$sexe) <- c("m", "f")
+ggplot(DF_for_plot, aes(x = sexe, group = sample, fill = sample)) +
+    geom_bar(aes(y=..prop..), binwidth = 1, alpha=0.4, position="dodge") + 
+        scale_fill_manual(values=c("Traumabase"="darkorchid4", "CRASH-2"="deepskyblue2", "CRASH-3"="darkorange1")) +
+    theme_classic() +
+    theme(legend.title = element_blank(), legend.position = "bottom", legend.box = "horizontal", legend.text = element_text(size=13, face="bold")) +
+  ylab("") +  # no title in legend
+     theme(axis.text = element_text(vjust = 0.5, hjust=1, size=8, face="bold"), axis.title.x = element_text(size=10, face="bold"))
+
+if (save_plots) {
+  if (use_majorExtracranial){
+    ggsave(filename=paste0(fig_dir, "distribution_sex_combining_crash2_traumabase_", "source", source_population, "_target", target_population, "_", stratum_name,"patients.pdf"),
+         plot = last_plot(),
+         width=8.8, height=6.8) 
+  } else {
+    ggsave(filename=paste0(fig_dir, "distribution_sex_combining_crash2_traumabase_", "source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name,"patients.pdf"),
+         plot = last_plot(),
+         width=8.8, height=6.8)
+  }
+}
+
+# DF_for_plot$pupilReact <- as.factor(DF_for_plot$pupilReact_num)
+# levels(DF_for_plot$pupilReact) <- c("Unable to assess", "None reacts", "One reacts", "Both react")
+# ggplot(DF_for_plot, aes(x = pupilReact, group = sample, fill = sample)) +
+#     geom_bar(aes(y=..prop..), binwidth = 1, alpha=0.4, position="dodge") + 
+#         scale_fill_manual(values=c("Traumabase"="darkorchid4", "CRASH-2"="deepskyblue2", "CRASH-3"="darkorange1")) +
+#     theme_classic() +
+#     theme(legend.title = element_blank(), legend.position = "bottom", legend.box = "horizontal", legend.text = element_text(size=13, face="bold")) +
+#   ylab("") +  # no title in legend
+#      theme(axis.text = element_text(vjust = 0.5, hjust=1, size=8, face="bold"), axis.title.x = element_text(size=10, face="bold"))
+# 
+# if (use_majorExtracranial){
+#   ggsave(filename=paste0(fig_dir, "distribution_pupils_combining_crash2_crash3_traumabase_", "source", source_population, "_target", target_population, "_", stratum_name,"patients.pdf"),
+#        plot = last_plot(),
+#        width=8.8, height=6.8) 
+# } else {
+#   ggsave(filename=paste0(fig_dir, "distribution_pupils_combining_crash2_crash3_traumabase_", "source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name,"patients.pdf"),
+#        plot = last_plot(),
+#        width=8.8, height=6.8)
+# }
+```
+
+
+```{r catdes_V}
+df_catdes <- total
+df_catdes$V <- as.factor(df_catdes$V)
+levels(df_catdes$V) <- c("Traumabase",rct_name)
+df_catdes$treatment <- as.factor(df_catdes$treatment)
+levels(df_catdes$treatment) <- c("Co", "Tr")
+df_catdes$V_W <- interaction(df_catdes$treatment,df_catdes$V)
+df_catdes <- dplyr::select(df_catdes, -c("V", "treatment", "V3"))
+x <- catdes2(df_catdes, num.var=which(colnames(df_catdes)=="V_W"), all.mods=T)
+plot_catdes(x, level=0.0001) 
+```
+
+```{r}
+if (save_plots) {
+  pdf(file=paste0(fig_dir, "rct", rct_name, "_source", source_population, "_target",target_population, "_", stratum_name, "patients_tb_V_catdes.pdf"), 
+      width=8.8, height=6.8)
+  plot_catdes(x, level=0.0001) 
+  dev.off()
+}
+```
+
+```{r}
+df_catdes <- total
+df_catdes$V <- as.factor(df_catdes$V)
+levels(df_catdes$V) <- c("Traumabase",rct_name)
+df_catdes$treatment <- as.factor(df_catdes$treatment)
+levels(df_catdes$treatment) <- c("Co", "Tr")
+df_catdes$V_W <- interaction(df_catdes$treatment,df_catdes$V)
+df_catdes <- dplyr::select(df_catdes, -c("V", "treatment", "V3", "continent"))
+x <- catdes2(df_catdes, num.var=which(colnames(df_catdes)=="V_W"), all.mods=T)
+plot_catdes(x, level=0.0001) 
+```
+
+```{r}
+if (save_plots) {
+  pdf(file=paste0(fig_dir, "rct", rct_name, "_source", source_population, "_target",target_population, "_", stratum_name, "patients_woContinents_tb_V_catdes.pdf"), 
+    width=8.8, height=6.8)
+  plot_catdes(x, level=0.0001) 
+  dev.off()
+  cairo_ps(file = paste0(fig_dir, "rct", rct_name, "_source", source_population, "_target",target_population, "_", 
+                  stratum_name, "patients_woContinents_tb_V_catdes.eps"), 
+      width=8.8, height=6.8,
+      onefile = FALSE, fallback_resolution = 200)
+  par(mar=c(0.1,0.1,0,0.1))
+  plot_catdes(x, level=0.0001) 
+  dev.off()
+}
+```
+
+
+
+# Preliminaries for generalization analysis
+
+We remove `central_capillary` and `respiratory_rate` from the list of outcome regressors since these are not available the
+Traumabase.
+
+```{r variable_names}
+variable_names <- unique(c(setdiff(c(trial_eligibility, outcome_impact), c("central_capillary", "respiratory_rate")), "V","treatment",outcome_name))
+```
+
+### Point estimates
+
+We start by applying all estimators (implemented in the `estimators.R` script) on
+the `total` data.frame.
+
+```{r all_estimators}
+point_estimators_glm <- compute_all(total[,variable_names], 
+                                    outcome_name=outcome_name, 
+                                    treatment_name="treatment", 
+                                    method="glm")
+point_estimators_grf <- compute_all(total[,variable_names], 
+                                    outcome_name=outcome_name, 
+                                    treatment_name="treatment", 
+                                    method="grf")
+
+unlist(point_estimators_glm)
+unlist(point_estimators_grf)
+```
+
+
+### Confidence interval estimation (Bootstrap)
+
+The confidence intervals are estimated via non-parametric stratified bootstrap.
+
+```{r, echo=T}
+stratified_bootstrap <- function(DF, nboot=100, estimator, method,
+                                 outcome_name="TBI_Death",
+                                 vars_s_model=NULL,
+                                 vars_y_model=NULL,
+                                 cw_type="Hajek",
+                                 do_mi=FALSE,
+                                 micemd_method=NULL,
+                                 nb_mi=NULL,
+                                 strategy=NULL,
+                                 complete_cases=FALSE,
+                                 ampute=FALSE,
+                                 verbose=FALSE){
+  
+  estimands <- c()
+  
+  ct_fail <- 0
+  if (verbose) cat("Iteration ")
+  for (i in 1:nboot){
+    if (verbose) cat(paste0(i, " "))
+    
+    # random resamples from RCT
+    n = nrow(DF[DF$V == 1,])
+    index_RCT = sample(1:n, n, replace = TRUE)
+    
+    # random resamples from RWD
+    m = nrow(DF[DF$V == 0,])
+    index_RWD = sample(1:m, m, replace = TRUE)
+    
+    # new data set
+    RCT_RWD <- rbind(DF[which(DF$V==1),][index_RCT,],
+                     DF[which(DF$V==0),][index_RWD,])
+    
+    # ampute values to keep similar fraction of NA in RWD part of the data
+    if (ampute) {
+      prop_miss_RWD <- sapply(DF[DF$V==0,], function(x) mean(is.na(x)))
+      for (j in 1:ncol(DF)){
+        prop_miss_boot <- mean(is.na(RCT_RWD[which(RCT_RWD$V==0),j]))
+        if (prop_miss_RWD[j] > 0.1 & prop_miss_RWD[j] > prop_miss_boot) {
+          idx_miss <- which(is.na(RCT_RWD[which(RCT_RWD$V==0),j]))
+          idx_new_miss <- sample(m-length(idx_miss),floor(m*(prop_miss_RWD[j]-prop_miss_boot)), replace = F)
+        }
+      }
+    }
+  
+    # estimation
+    estimand <- NULL
+    
+    if (do_mi) {
+      try(estimand <- unlist(estimator(RCT_RWD, outcome_name=outcome_name, method=method, complete_cases=complete_cases,
+                                     vars_s_model=vars_s_model, vars_y_model=vars_y_model,
+                                     nb_mi=nb_mi, micemd_method=micemd_method,
+                                     strategy=strategy,
+                                     cw_type=cw_type)))
+    } else {
+    try(estimand <- unlist(estimator(RCT_RWD, outcome_name=outcome_name, method=method, complete_cases=complete_cases,
+                                     vars_s_model=vars_s_model, vars_y_model=vars_y_model)))
+    }
+    if (!is.null(estimand)){
+    estimands <- rbind(estimands, data.frame(t(estimand)))
+    } else {
+      cat(paste0(i,"-> fail, "))
+      ct_fail <- ct_fail + 1
+    }
+  }
+  if (as.character(substitute(estimator))=="compute_ipsw"){
+    estimands <- data.frame(estimands)
+    colnames(estimands) <- paste0(c("IPSW_", "IPSW.norm_"), method)
+  }
+  if (as.character(substitute(estimator))=="compute_all"){
+    estimands <- data.frame(estimands)
+    if (access_genRCT) {
+      colnames(estimands) <- paste0(c("IPSW_", "IPSW.norm_", "G-formula_", "AIPSW_", "CW_"), method)
+    } else {
+      colnames(estimands) <- paste0(c("IPSW_", "IPSW.norm_", "G-formula_", "AIPSW_"), method)
+    }
+  }
+  if (as.character(substitute(estimator))=="compute_all_mi"){
+    estimands <- data.frame(estimands)
+    estimands <- dplyr::select(estimands, -"nb_mi")
+    if (access_genRCT) {
+      colnames(estimands) <- paste0(c("IPSW_", "IPSW.norm_", "G-formula_", "AIPSW_", "CW_"), method)
+    } else {
+      colnames(estimands) <- paste0(c("IPSW_", "IPSW.norm_", "G-formula_", "AIPSW_"), method)
+    }
+  }
+  print(paste0("Number of failed iterations: ", ct_fail))
+  return(estimands)
+}
+```
+
+# ATE transported from CRASH-2 study to the Traumabase TBI patients
+
+Note that when using the original Traumabase, the standard estimators (IPSW, CO, AIPSW)
+need to be adapted to handle missing values that are not missing completely at random (MCAR).
+
+We propose three ways of addressing this handling of missing values:
+
+- Logistic regression via Expectation Maximization (EM) that explicitly handles missing values
+that are missing at random (MAR).
+- Generalized random forests that consider that missing values are potentially 
+informative, this is achieved through the *missing incorporated in attributes* 
+(MIA) criterion.
+- Multilevel multiple imputation combined with parametric IPSW, CO and AIPSW estimation.
+
+
+## Estimation
+
+
+```{r micemd_manual}
+if (rct_name=="CRASH-2"){
+   micemd_method <- c("2l.2stage.bin", "2l.2stage.norm", "2l.2stage.norm", "2l.2stage.norm",    "2l.2stage.norm", "2l.2stage.pois", "2l.2stage.bin","2l.2stage.pois","", "","")
+}
+if (rct_name=="CRASH-3"){
+micemd_method <- c("", "2l.2stage.pois", "2l.2stage.pois", "2l.2stage.norm", "2l.2stage.bin", "2l.2stage.norm", "2l.2stage.norm", "", "", "")
+names(micemd_method) <- variable_names
+}
+```
+
+```{r original_data, eval=T}
+model <- c()
+context <- c()
+stratum <- c()
+ATE <- c()
+STD <- c()
+CI_inf <- c()
+CI_sup <- c()
+
+
+if (use_majorExtracranial & file.exists(paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_mlmi_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))) {
+  load(file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_mlmi_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+} else if (!use_majorExtracranial & file.exists(paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name, "patients_mlmi_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))) {
+  load(file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name, "patients_mlmi_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+} else {
+  if (rct_name=="CRASH-2"){
+    temp_mi <- total[,variable_names] %>% mutate(sexe=as.factor(sexe), hemorrhage_risk=as.factor(hemorrhage_risk),
+                              age=as.numeric(age),
+                              systolicBloodPressure=as.numeric(systolicBloodPressure),
+                              heart_rate=as.numeric(heart_rate))
+  }
+  if (rct_name=="CRASH-3"){
+    temp_mi <- total[,variable_names] %>% mutate(sexe=as.factor(sexe))
+  }
+  ate_mi_glm <- compute_all_mi(temp_mi, outcome_name=outcome_name, method="glm",
+                               strategy = "multi-level-woY", nb_mi=20,
+                               micemd_method = micemd_method,
+                               vars_s_model= trial_eligibility, cw_type="Hajek")
+  bootstrap_mi_glm <- stratified_bootstrap(temp_mi, nboot=nboot, 
+                                           estimator=compute_all_mi, method="glm",
+                                           outcome_name=outcome_name,
+                                           vars_s_model=trial_eligibility,
+                                           do_mi=T, nb_mi=20,
+                                           strategy = "multi-level-woY",
+                                           micemd_method = micemd_method,
+                                           cw_type="Hajek",
+                                           verbose=T)
+  
+  if (use_majorExtracranial){
+  save(ate_mi_glm, bootstrap_mi_glm, 
+       file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_mlmi_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+  } else {
+    save(ate_mi_glm, bootstrap_mi_glm, 
+       file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name, "patients_mlmi_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+  }
+}
+
+bootstrap_ipsw_mi_glm_sorted <- sort(bootstrap_mi_glm[1:nboot,1])
+model <- c(model, "MI_IPSW_glm")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_mi_glm[[1]])
+STD <- c(STD, (bootstrap_ipsw_mi_glm_sorted[nboot]- bootstrap_ipsw_mi_glm_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_ipsw_mi_glm_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_ipsw_mi_glm_sorted, 0.975 ))
+
+bootstrap_ipswnorm_mi_glm_sorted <- sort(bootstrap_mi_glm[1:nboot,2])
+model <- c(model, "MI_IPSW.norm_glm")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_mi_glm[[2]])
+STD <- c(STD, (bootstrap_ipswnorm_mi_glm_sorted[nboot]- bootstrap_ipswnorm_mi_glm_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_ipswnorm_mi_glm_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_ipswnorm_mi_glm_sorted, 0.975 ))
+
+bootstrap_gformula_mi_glm_sorted <- sort(bootstrap_mi_glm[1:nboot,3])
+model <- c(model, "MI_G-formula_glm")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_mi_glm[[3]])
+STD <- c(STD, (bootstrap_gformula_mi_glm_sorted[nboot] - bootstrap_gformula_mi_glm_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_gformula_mi_glm_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_gformula_mi_glm_sorted, 0.975 ))
+
+bootstrap_aipsw_mi_glm_sorted <- sort(bootstrap_mi_glm[1:nboot,4])
+model <- c(model, "MI_AIPSW_glm")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_mi_glm[[4]])
+STD <- c(STD, (bootstrap_aipsw_mi_glm_sorted[nboot] - bootstrap_aipsw_mi_glm_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_aipsw_mi_glm_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_aipsw_mi_glm_sorted, 0.975 ))
+
+bootstrap_cw_mi_glm_sorted <- sort(bootstrap_mi_glm[1:nboot,5])
+model <- c(model, "MI_CW_glm")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_mi_glm[[5]])
+STD <- c(STD, (bootstrap_cw_mi_glm_sorted[nboot] - bootstrap_cw_mi_glm_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_cw_mi_glm_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_cw_mi_glm_sorted, 0.975 ))
+
+
+if (use_majorExtracranial & file.exists(paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_glm_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))) {
+  load(file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_glm_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+} else if (!use_majorExtracranial & file.exists(paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name, "patients_glm_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))) {
+  load(file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name, "patients_glm_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+} else {
+  ate_glm <- compute_all(total[,variable_names], outcome_name=outcome_name, method="glm",
+                         vars_s_model= trial_eligibility)
+  bootstrap_glm <- stratified_bootstrap(DF=total[,variable_names], nboot=nboot, 
+                                        estimator=compute_all, method="glm", outcome_name=outcome_name,
+                                        vars_s_model=trial_eligibility,
+                                        verbose=T)
+  
+  
+  if (use_majorExtracranial){
+  save(ate_glm, bootstrap_glm, 
+       file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_glm_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+  } else {
+    save(ate_glm, bootstrap_glm, 
+       file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name, "patients_glm_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+  }
+}
+
+bootstrap_ipsw_glm_sorted <- sort(bootstrap_glm[1:nboot,1])
+model <- c(model, "EM_IPSW_glm")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_glm[[1]])
+STD <- c(STD, (bootstrap_ipsw_glm_sorted[nboot]- bootstrap_ipsw_glm_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_ipsw_glm_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_ipsw_glm_sorted, 0.975 ))
+
+bootstrap_ipswnorm_glm_sorted <- sort(bootstrap_glm[1:nboot,2])
+model <- c(model, "EM_IPSW.norm_glm")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_glm[[2]])
+STD <- c(STD, (bootstrap_ipswnorm_glm_sorted[nboot]- bootstrap_ipswnorm_glm_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_ipswnorm_glm_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_ipswnorm_glm_sorted, 0.975 ))
+
+bootstrap_gformula_glm_sorted <- sort(bootstrap_glm[1:nboot,3])
+model <- c(model, "EM_G-formula_glm")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_glm[[3]])
+STD <- c(STD, (bootstrap_gformula_glm_sorted[nboot] - bootstrap_gformula_glm_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_gformula_glm_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_gformula_glm_sorted, 0.975 ))
+
+bootstrap_aipsw_glm_sorted <- sort(bootstrap_glm[1:nboot,4])
+model <- c(model, "EM_AIPSW_glm")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_glm[[4]])
+STD <- c(STD, (bootstrap_aipsw_glm_sorted[nboot] - bootstrap_aipsw_glm_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_aipsw_glm_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_aipsw_glm_sorted, 0.975 ))
+
+
+
+if (use_majorExtracranial & file.exists(paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_grf_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))) {
+  load(file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_grf_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+} else if (!use_majorExtracranial & file.exists(paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name, "patients_grf_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))) {
+  load(file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name, "patients_grf_estimators_nboot", nboot, "_traumabase_", outcome_name_string, ".RData"))
+} else {
+  ate_grf <- compute_all(total[,variable_names], outcome_name=outcome_name, method="grf",
+                         vars_s_model=crash2_trial_eligibility)
+  bootstrap_grf <- stratified_bootstrap(DF=total[,variable_names], nboot=nboot, 
+                                        estimator=compute_all, method="grf", outcome_name=outcome_name,
+                                        vars_s_model=crash2_trial_eligibility,
+                                        verbose=T)
+  if (use_majorExtracranial){
+    save(ate_grf, bootstrap_grf, file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_", stratum_name, "patients_grf_estimators_nboot",nboot, "_traumabase_", outcome_name_string, ".RData"))
+  } else {
+    save(ate_grf, bootstrap_grf, file=paste0(results_dir, "rct", rct_name, "_source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name, "patients_grf_estimators_nboot",nboot, "_traumabase_", outcome_name_string, ".RData"))
+  }
+}
+
+
+bootstrap_ipsw_grf_sorted <- sort(bootstrap_grf[,1])
+model <- c(model, "MIA_IPSW_grf")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_grf[[1]])
+STD <- c(STD, (bootstrap_ipsw_grf_sorted[nboot] - bootstrap_ipsw_grf_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_ipsw_grf_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_ipsw_grf_sorted, 0.975 ))
+
+
+bootstrap_ipswnorm_grf_sorted <- sort(bootstrap_grf[,2])
+model <- c(model, "MIA_IPSW.norm_grf")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_grf[[2]])
+STD <- c(STD, (bootstrap_ipswnorm_grf_sorted[nboot] - bootstrap_ipswnorm_grf_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_ipswnorm_grf_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_ipswnorm_grf_sorted, 0.975 ))
+
+
+bootstrap_gformula_grf_sorted <- sort(bootstrap_grf[,3])
+model <- c(model, "MIA_G-formula_grf")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_grf[[3]])
+STD <- c(STD, (bootstrap_gformula_grf_sorted[nboot] - bootstrap_gformula_grf_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_gformula_grf_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_gformula_grf_sorted, 0.975 ))
+
+bootstrap_aipsw_grf_sorted <- sort(bootstrap_grf[,4])
+model <- c(model, "MIA_AIPSW_grf")
+context <- c(context, "generalization")
+stratum <- c(stratum, stratum_name)
+ATE <- c(ATE, ate_grf[[4]])
+STD <- c(STD, (bootstrap_aipsw_grf_sorted[nboot] - bootstrap_aipsw_grf_sorted[1])/2 )
+CI_inf <- c(CI_inf, quantile(bootstrap_aipsw_grf_sorted, 0.025 ))
+CI_sup <- c(CI_sup, quantile(bootstrap_aipsw_grf_sorted, 0.975 ))
+
+results_gen <- data_frame("Context" = context,
+                          "Model" = model,
+                          "Stratum" = stratum,
+                          "ATE" = ATE,
+                          "STD" = STD,
+                          "CI_inf" = CI_inf,
+                          "CI_sup" = CI_sup)
+```
+
+
+
+
+```{r}
+# Stack all results from observational analysis, RCT analysis and combined analysis.
+results_total <- rbind(results_gen, results_rwe, results_rct)
+```
+
+## Plot of the final results
+
+```{r}
+results <- results_total
+results$CI_inf <- as.numeric(results$CI_inf)
+results$CI_sup <- as.numeric(results$CI_sup)
+
+results$ATE <- as.numeric(results$ATE)
+results$Context <- as.factor(results$Context)
+results$Model <- as.factor(results$Model)
+results$Stratum <- as.factor(results$Stratum)
+levels(results$Context) = c("Generalization", paste0("RCT - ", rct_name, " \n(", length(trial_eligibility),"+",  length(outcome_impact)," variables)"), "Observational data \n(17+21 variables)")
+results$Context <- as.character(results$Context)
+results <- results[order(results$Context),]
+if (methods %in% c("grf", "glm")){
+  results <- results %>%
+    filter(endsWith(Model, methods) | startsWith(Context, "RCT"))
+} else if (methods != "all") {
+  results <- results %>%
+    filter(startsWith(Context, "RCT") | startsWith(Context, "Generalization") | (startsWith(Context, "Observational") & Model %in% methods))
+}
+
+results %>%
+  mutate(Model=as.factor(gsub("G-formula","CO",as.character(Model)))) %>%
+  mutate(Model=as.factor(ifelse(endsWith(as.character(Model), "_glm") | endsWith(as.character(Model), "_grf"), substr(as.character(Model), 1, nchar(as.character(Model))-4), as.character(Model)))) %>%
+  filter(Stratum == stratum & !(Model %in% c("MI_IPSW", "EM_IPSW", "MIA_IPSW"))) %>% #& !(Model %in% c("EM_AIPSW_glm", "EM_IPSW_glm"))) %>%
+  mutate(Model=as.factor(gsub("IPSW.norm","IPSW",as.character(Model)))) %>%
+  mutate(Model=as.factor(gsub("MICE_","MI_",as.character(Model)))) %>%
+  mutate(Model = fct_reorder(Model, Context)) %>%
+ggplot(aes(x = Model, y = ATE, ymin = CI_inf, ymax = CI_sup, color = Context)) + 
+  geom_errorbar(width = 0.2) +
+  geom_point(size = 1.5) +
+  geom_hline(aes(yintercept=0))+
+  xlab("")+
+  coord_flip() +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.key = element_rect(color = NA, fill = NA),
+        legend.position="bottom",
+        legend.box="vertical", legend.margin=margin(),
+        legend.key.size = unit(1.5, "cm")) + 
+  guides(color=guide_legend(nrow=1,byrow=TRUE)) +
+  scale_color_manual(values=c("#C41E4E", "darkorchid4", "deepskyblue2", "yellow4", "darkorange1"), breaks=c("Generalization","Observational data \n(17+21 variables)" , "RCT - CRASH-2 \n(5+5 variables)","RCT - CRASH-2+CRASH-3 \n(0 variables)", "RCT - CRASH-3 \n(3+4 variables)"))
+```
+
+```{r}
+if (save_plots) {
+  if (use_majorExtracranial){
+    ggsave(filename=paste0(fig_dir, "results_combining_",rct_name,"_traumabase_", "source", source_population, "_target", target_population, "_", stratum_name,"patients_nboot",nboot,"_",  outcome_name_string, ".pdf"),
+         plot = last_plot(),
+         width=6.8, height=8.8) 
+    ggsave(filename=paste0(fig_dir, "results_combining_",rct_name,"_traumabase_", "source", source_population, "_target", target_population, "_", stratum_name,"patients_nboot",nboot,"_",  outcome_name_string, ".eps"),
+         plot = last_plot(),
+         width=6.8, height=8.8, 
+         device=cairo_ps, fallback_resolution = 200) 
+  } else {
+    ggsave(filename=paste0(fig_dir, "results_combining_",rct_name,"_traumabase_", "source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name,"patients_nboot",nboot,"_", outcome_name_string, ".pdf"),
+         plot = last_plot(),
+         width=6.8, height=8.8)
+    ggsave(filename=paste0(fig_dir, "results_combining_",rct_name,"_traumabase_", "source", source_population, "_target", target_population, "_woExtracranialVar_", stratum_name,"patients_nboot",nboot,"_", outcome_name_string, ".eps"),
+         plot = last_plot(),
+         width=6.8, height=8.8,
+         device=cairo_ps, fallback_resolution = 200)
+  }
+}
+```
+
+
+# Appendix
+
+## CRASH-3 analysis (results from CRASH-3 paper)
+
+In this part we load the CRASH-3 data and reproduce the results in the publication with the risk ratio (RR). We also provide the results with the ATE to fit the framework of the review.
+
+The outcome is the 28-day death due to brain injury (same output is taken in the Traumabase).
+
+To recover the exact same results as presented in the CRASH-3 paper, we exclude 
+patients with minimal GCS (equal to 3), or bilateral non-reactive pupils (*mydriasis*).
+
+
+```{r crash3_paper_results_1}
+temp <- read.csv(paste0(data_dir,"output_preprocess_combined_allPatients_crash2_crash3_TB.csv"), row.names = 1)
+temp <- temp[which(temp$V3==2 & temp$Glasgow.initial > 3 & temp$pupilReact_num != 0),]
+
+risk_ratio(temp, outcome_name="TBI_Death", treatment_name="treatment")
+difference_in_means(temp, outcome_name="TBI_Death", treatment_name="treatment")
+```
+
+
