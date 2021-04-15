@@ -139,7 +139,12 @@ outcome_regressions <- function(DF, method="glm", outcome_name="Y", treatment_na
   temp <- DF
   temp$outcome <- temp[,outcome_name]
   temp$treatment <- temp[,treatment_name]
-  temp <- dplyr::select(temp, -c(outcome_name,treatment_name))
+  if (outcome_name != "outcome"){
+    temp <- dplyr::select(temp, -c(outcome_name))
+  }
+  if (treatment_name != "treatment") {
+    temp <- dplyr::select(temp, -c(treatment_name))
+  }
   
   binary_y <- FALSE
   if (length(unique(temp$outcome))==2) binary_y <- TRUE
@@ -237,7 +242,12 @@ compute_ipsw <- function(DF, outcome_name="Y", treatment_name="A",
   }
   temp$outcome <- temp[,outcome_name]
   temp$treatment <- temp[,treatment_name]
-  temp <- dplyr::select(temp, -c(outcome_name, treatment_name))
+  if (outcome_name != "outcome"){
+    temp <- dplyr::select(temp, -c(outcome_name))
+  }
+  if (treatment_name != "treatment") {
+    temp <- dplyr::select(temp, -c(treatment_name))
+  }
   
   m <- nrow(temp[temp$V ==0, ])
   
@@ -304,7 +314,12 @@ compute_aipsw <- function(DF, outcome_name="Y", treatment_name="A",
   rct$mu_10 <-  mus_hat[['rct_mu_10_hat']]
   rct$outcome <- rct[,outcome_name]
   rct$treatment <- rct[,treatment_name]
-  rct <- dplyr::select(rct, -c(outcome_name, treatment_name))
+  if (outcome_name != "outcome"){
+    rct <- dplyr::select(rct, -c(outcome_name))
+  }
+  if (treatment_name != "treatment") {
+    rct <- dplyr::select(rct, -c(treatment_name))
+  }
   
   if (normalized == FALSE){
     tau_ipsw <- (2/m)*with(rct, sum(odds*treatment*(outcome - mu_11) - odds*(1-treatment)*(outcome - mu_10)))  
@@ -333,7 +348,12 @@ compute_stratification <- function(DF, nb_strat = 10, bin = "quantile",
   
   temp$outcome <- temp[,outcome_name]
   temp$treatment <- temp[,treatment_name]
-  temp <- dplyr::select(temp, -c(outcome_name,treatment_name))
+  if (outcome_name != "outcome"){
+    temp <- dplyr::select(temp, -c(outcome_name))
+  }
+  if (treatment_name != "treatment") {
+    temp <- dplyr::select(temp, -c(treatment_name))
+  }
   
   # logit : sampling score
   # temp$V <- as.numeric(temp$V)
@@ -427,7 +447,12 @@ compute_all <- function(DF, outcome_name="Y", treatment_name="A",
   # IPSW estimator
   rct$outcome <- rct[,outcome_name]
   rct$treatment <- rct[,treatment_name]
-  rct <- dplyr::select(rct, -c(outcome_name, treatment_name))
+  if (outcome_name != "outcome"){
+    rct <- dplyr::select(rct, -c(outcome_name))
+  }
+  if (treatment_name != "treatment") {
+    rct <- dplyr::select(rct, -c(treatment_name))
+  }
   tau_ipsw_hat <- (2/m)*with(rct, sum(odds*treatment*outcome - odds*(1-treatment)*outcome))
   tau_ipsw_norm_hat <- with(rct, sum(odds*treatment*outcome/sum(odds*treatment) - odds*(1-treatment)*outcome/sum(odds*(1-treatment))))
   
