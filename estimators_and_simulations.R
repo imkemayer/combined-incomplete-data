@@ -1,8 +1,8 @@
 library(reshape2)
 library(MASS)
 library(dplyr)
-library(misaem)
-library(grf)
+library(misaem)  # for glm (linear and logistic) with missing data
+library(grf)     # for generalized random forests, option for incomplete data
 library(devtools)
 library(pracma)
 library(genRCT)  # for Calibration Weighting (Dong's implementation)
