@@ -1,3 +1,9 @@
-*.RData
+.Rhistory
+.RData
+.Ruserdata
+.Rprofile
+data/
 figures/*.pdf
+figures/*.eps
+*.RData
 .DS_Store
